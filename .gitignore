@@ -1,0 +1,24 @@
+# 설정 파일/키 들어있는 폴더
+config/
+
+# 대용량/재생성 가능한 데이터는 전부 무시
+data/
+features/
+models/
+reports/
+
+# 바이너리/중간 산출물
+*.parquet
+*.joblib
+*.pkl
+*.zip
+*.7z
+*.log
+
+# 파이썬 캐시/노트북 잡동사니
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# 기타 환경파일
+*.env

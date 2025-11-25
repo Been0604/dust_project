@@ -1,0 +1,204 @@
+"""
+make_local_alert_events_pm25.py
+
+에어코리아 '초미세먼지(PM2.5) 경보제 발령 현황' 엑셀들을 모아서
+→ 대전만 필터
+→ 2021~2023 구간만 사용
+→ 24시(24:00)는 다음날 00시로 보정
+→ 시간 단위(ts_kst)로 펼친 이벤트 테이블을 만들어
+
+data/local_alert_events_pm25.parquet 으로 저장한다.
+
+최종 컬럼:
+- ts_kst      : 경보가 유효한 시각 (KST, 1시간 단위)
+- area        : 권역 (동부/서부 등)
+- y_loc_pm25  : 로컬 PM2.5 경보 단계 (1=주의보, 2=경보)
+"""
+
+from pathlib import Path
+import pandas as pd
+
+
+# ---------- 경로 설정 ----------
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+ALERT_DIR = DATA_DIR / "airkorea_pm_alerts"
+
+# PM2.5 경보 엑셀 파일 목록
+ALERT_FILES_PM25 = [
+    ALERT_DIR / "airkorea_pm25_alerts_2015_2021.xlsx",
+    ALERT_DIR / "airkorea_pm25_alerts_2022.xlsx",
+    ALERT_DIR / "airkorea_pm25_alerts_2023.xlsx",
+]
+
+# 한글 헤더 → 영어 헤더 매핑 (PM10과 동일)
+RENAME_COLS = {
+    "시도": "province",
+    "권역": "area",
+    "경보단계": "alert_step",
+    "발령날짜": "start_date",
+    "발령시각": "start_hour",
+    "발령농도": "start_conc",
+    "발령기준": "start_basis",
+    "해제날짜": "end_date",
+    "해제시각": "end_hour",
+    "해제농도": "end_conc",
+    "해제기준": "end_basis",
+    "경과시간": "duration_hours",
+    "처리구분": "status",
+}
+
+
+# ---------- 헬퍼 함수들 ----------
+
+def load_alert_excel(path: Path) -> pd.DataFrame:
+    print(f"[정보] 엑셀 로드: {path}")
+    raw = pd.read_excel(path, header=None)
+
+    matches = raw.eq("시도").any(axis=1)
+    if not matches.any():
+        raise ValueError(f"[에러] 파일 {path}에서 '시도' 헤더 행을 찾지 못했습니다.")
+
+    header_row_idx = raw.index[matches][0]
+    header = raw.iloc[header_row_idx]
+    df = raw.iloc[header_row_idx + 1 :].copy()
+    df.columns = header
+
+    df = df.dropna(how="all")
+
+    return df
+
+
+def build_ts_with_24(date_series: pd.Series, hour_series: pd.Series) -> pd.Series:
+    base_date = pd.to_datetime(date_series, errors="coerce").dt.normalize()
+    hour = pd.to_numeric(hour_series, errors="coerce")
+
+    mask_24 = hour == 24
+    hour = hour.where(~mask_24, 0)
+
+    ts = base_date + pd.to_timedelta(hour, unit="h")
+    ts.loc[mask_24] = ts.loc[mask_24] + pd.Timedelta(days=1)
+
+    return ts
+
+
+def preprocess_pm25_alerts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    - 대전만 필터
+    - 컬럼 영어로 리네임
+    - start_ts / end_ts / y_loc_pm25 생성
+    - 2021~2023만 사용
+    """
+    if "시도" not in df.columns:
+        raise ValueError("[에러] '시도' 컬럼이 없습니다. 엑셀 구조를 확인해 주세요.")
+
+    df = df[df["시도"] == "대전"].copy()
+    if df.empty:
+        print("[경고] 대전 데이터가 비어 있습니다.")
+        return df
+
+    df = df.rename(columns=RENAME_COLS)
+
+    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
+    df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
+    df["start_hour"] = pd.to_numeric(df["start_hour"], errors="coerce")
+    df["end_hour"] = pd.to_numeric(df["end_hour"], errors="coerce")
+
+    df = df.dropna(subset=["start_date", "end_date", "start_hour", "end_hour"])
+
+    df["start_ts"] = build_ts_with_24(df["start_date"], df["start_hour"])
+    df["end_ts"] = build_ts_with_24(df["end_date"], df["end_hour"])
+
+    mask_year = (df["start_ts"].dt.year >= 2021) & (df["start_ts"].dt.year <= 2023)
+    df = df[mask_year].copy()
+    if df.empty:
+        print("[경고] 2021~2023 대전 PM2.5 경보 데이터가 없습니다.")
+        return df
+
+    if "alert_step" not in df.columns:
+        raise ValueError("[에러] '경보단계' → 'alert_step' 리네임이 안 된 것 같습니다.")
+
+    step_map = {"주의보": 1, "경보": 2}
+    df["y_loc_pm25"] = df["alert_step"].map(step_map)
+    df["y_loc_pm25"] = df["y_loc_pm25"].fillna(1).astype(int)
+
+    print("[정보] 대전 행 개수:", len(df))
+    print(
+        df[
+            ["province", "area", "alert_step", "start_ts", "end_ts", "duration_hours", "y_loc_pm25"]
+        ].head()
+    )
+
+    return df
+
+
+def expand_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    각 경보 이벤트(발령 ~ 해제)를 시간 단위로 풀어서
+    ts_kst, area, y_loc_pm25 컬럼을 가진 테이블 생성.
+    """
+    rows = []
+
+    for row in df.itertuples():
+        rng = pd.date_range(row.start_ts, row.end_ts, freq="h", inclusive="left")
+
+        for ts in rng:
+            rows.append(
+                {
+                    "ts_kst": ts,
+                    "area": row.area,
+                    "y_loc_pm25": row.y_loc_pm25,
+                }
+            )
+
+    events = pd.DataFrame(rows)
+    if events.empty:
+        print("[경고] 시간대별 이벤트가 비어 있습니다.")
+        return events
+
+    events = (
+        events.groupby(["ts_kst", "area"], as_index=False)["y_loc_pm25"]
+        .max()
+        .sort_values(["ts_kst", "area"])
+    )
+
+    print("[정보] 시간대별 이벤트 행 개수:", len(events))
+    print(events.head())
+
+    return events
+
+
+# ---------- main ----------
+
+def main():
+    dfs = []
+    for path in ALERT_FILES_PM25:
+        if path.exists():
+            df_raw = load_alert_excel(path)
+            dfs.append(df_raw)
+        else:
+            print(f"[경고] 파일 없음: {path}")
+
+    if not dfs:
+        print("[에러] 읽을 수 있는 PM2.5 경보제 엑셀이 없습니다.")
+        return
+
+    df_all = pd.concat(dfs, ignore_index=True)
+
+    df_dj = preprocess_pm25_alerts(df_all)
+    if df_dj.empty:
+        print("[에러] 대전 PM2.5 경보 데이터 없음. 중단.")
+        return
+
+    events = expand_to_hourly(df_dj)
+    if events.empty:
+        print("[에러] 시간대별 이벤트 생성 실패. 중단.")
+        return
+
+    out_path = DATA_DIR / "local_alert_events_pm25.parquet"
+    events.to_parquet(out_path, index=False)
+    print(f"[완료] 대전 PM2.5 시간대별 경보 이벤트 저장: {out_path}")
+
+
+if __name__ == "__main__":
+    main()
