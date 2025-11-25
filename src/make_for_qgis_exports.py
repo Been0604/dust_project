@@ -1,21 +1,7 @@
 # src/make_for_qgis_exports.py
-#
-# 목적:
-#   processed_with_preds_both.parquet을 기반으로
-#   QGIS에서 쓰기 좋은 두 개의 테이블을 생성한다.
-#
-#   1) for_qgis_2021_2023.parquet
-#      - 2021~2023년 구간
-#      - 실측 + XGB 예측 + 로컬 경보 + 황사 단계 + 기본 시간 피처
-#
-#   2) for_qgis_2024.parquet
-#      - 2024년 구간
-#      - 실측 + XGB 예측 + 기본 시간 피처 (경보/황사 라벨 없음)
 
 from pathlib import Path
-
 import pandas as pd
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -56,7 +42,7 @@ def main() -> None:
     # 시간 파생변수 추가
     df = add_time_features(df)
 
-    # 2021~2023 / 2024 분리
+    # 연도별 분리
     df_2123 = df[df["year"].between(2021, 2023)].copy()
     df_2024 = df[df["year"] == 2024].copy()
 
@@ -64,7 +50,7 @@ def main() -> None:
     print(f"[INFO] 2021-2023 행 수: {len(df_2123):,}")
     print(f"[INFO] 2024 행 수: {len(df_2024):,}")
 
-    # QGIS에서 쓸 컬럼 구성
+    # 공통 컬럼
     cols_common = [
         "ts_kst",
         "station_id",
@@ -72,32 +58,38 @@ def main() -> None:
         "area",
         "pm10",
         "pm25",
-        "y_pred_xgb",         # PM10 XGB 예측
-        "y_pred_xgb_pm25",    # PM2.5 XGB 예측
+        "y_pred_xgb",
+        "y_pred_xgb_pm25",
         "year",
         "month",
         "hour",
         "season",
     ]
 
+    # 2021-2023 전용 라벨
     cols_2123_extra = [
         "y_loc_pm10",
         "y_loc_pm25",
         "dust_stage",
     ]
 
-    # 2021~2023: 경보/황사 라벨 포함
+    # ---------- 2021–2023용: NaN → 0 처리 ----------
     cols_2123 = cols_common + cols_2123_extra
     missing_2123 = [c for c in cols_2123 if c not in df_2123.columns]
     if missing_2123:
         raise ValueError(f"2021-2023 export에서 누락된 컬럼: {missing_2123}")
+
+    # 경보/황사 라벨 결측값을 0으로 채움 (QGIS 시각화용)
+    for col in ["y_loc_pm10", "y_loc_pm25", "dust_stage"]:
+        if col in df_2123.columns:
+            df_2123[col] = df_2123[col].fillna(0)
 
     out_2123 = df_2123[cols_2123].sort_values(["ts_kst", "station_id"])
     out_2123_path = DATA_DIR / "for_qgis_2021_2023.parquet"
     out_2123.to_parquet(out_2123_path, index=False)
     print(f"[INFO] 저장 완료: {out_2123_path} (rows={len(out_2123):,})")
 
-    # 2024: 경보/황사 라벨 없이 저장
+    # ---------- 2024용: 경보/황사 라벨 없이 ----------
     cols_2024 = cols_common
     missing_2024 = [c for c in cols_2024 if c not in df_2024.columns]
     if missing_2024:
