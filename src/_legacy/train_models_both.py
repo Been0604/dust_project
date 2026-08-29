@@ -31,10 +31,7 @@ def train_for_target(pollutant: str):
 
     target_col = f"target_{pollutant}"
 
-    # year 제외: 학습 2021-22 / 검증 2023 / 외부검증 2024로 연도가 겹치지 않아
-    # 트리 모형이 검증 구간의 year 값에 외삽하지 못한다. 일반화에 기여하지 않고
-    # 학습 구간의 연도별 변동만 기억하게 되므로 피처에서 제외한다.
-    drop_cols = {"ts_kst", "station_id", "year", "target_pm10", "target_pm25"}
+    drop_cols = {"ts_kst", "station_id", "target_pm10", "target_pm25"}
     feature_cols = [c for c in df.columns if c not in drop_cols]
 
     # 연도 분할: 2021–22 train, 2023 val
