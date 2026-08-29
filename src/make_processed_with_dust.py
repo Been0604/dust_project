@@ -13,7 +13,8 @@
 from pathlib import Path
 import pandas as pd
 
-PROJECT_ROOT = Path(r"C:\Users\wachu\dust_project")
+# 저장소 최상위 = 이 파일(src/xxx.py)의 부모의 부모
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 
 
