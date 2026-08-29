@@ -13,15 +13,29 @@ v2의 수정:
 
     persistence 예측:  pred(t+1) = obs(t)
     skill score     :  1 - RMSE_model / RMSE_persistence   (양수면 모형 우세)
+
+이 파일이 baseline 평가의 최종본이며, 출력 baseline_results.csv가
+보고서 표 8·표 9의 근거 자료이다.
+
+실행:  python src/baseline.py   (저장소 최상위에서)
 """
 
+from pathlib import Path
 import pandas as pd
 import numpy as np
 
-PARQUET = 'processed_with_preds_both.parquet'
-OUT_CSV = 'baseline_results_v2.csv'
+# ---------------------------------------------------------------- 경로
+# features.py와 같은 규약: 스크립트 위치를 기준으로 저장소 최상위를 찾는다.
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+
+PARQUET = DATA_DIR / "processed_with_preds_both.parquet"
+OUT_CSV = Path(__file__).resolve().parent / "baseline_results.csv"
 
 # ---------------------------------------------------------------- 데이터 적재
+if not PARQUET.exists():
+    raise FileNotFoundError(PARQUET)
+
 df = pd.read_parquet(PARQUET)
 df['year'] = df['ts_kst'].dt.year
 
